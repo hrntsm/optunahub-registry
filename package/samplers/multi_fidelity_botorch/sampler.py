@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from collections.abc import Sequence
 from typing import Any
+from typing import Literal
 
 import numpy
 from optuna._imports import try_import
@@ -69,7 +70,7 @@ class MFBotorchSampler(BaseSampler):
             ]
             | None
         ) = None,
-        acquisition_function: str = "mfkg",
+        acquisition_function: Literal["mfkg", "mfmes"] = "mfkg",
         n_startup_trials: int = 10,
         independent_sampler: BaseSampler | None = None,
         seed: int | None = None,
@@ -152,17 +153,12 @@ class MFBotorchSampler(BaseSampler):
             (n_trials, trans.bounds.shape[0] + 1), dtype=numpy.float64
         )  # +1 for fidelity
 
-        # Extend bounds to include fidelity dimension (0.0 to 1.0)
-        # bounds is shape (n_params, 2), so we add one row for fidelity
         fidelity_bounds = numpy.array([[0.0, 1.0]], dtype=numpy.float64)
         bounds = numpy.concatenate([bounds, fidelity_bounds], axis=0)
 
         for trial_idx, trial in enumerate(trials):
             if trial.state == TrialState.COMPLETE:
-                # Transform regular parameters
                 regular_params = trans.transform(trial.params)
-
-                # Get fidelity from trial attributes
                 trial_fidelity = trial.system_attrs.get("MFBOSampler:Fidelity", 1.0)
 
                 # Combine regular parameters with fidelity (fidelity as last dimension)
@@ -217,7 +213,7 @@ class MFBotorchSampler(BaseSampler):
                 )
 
                 # Generate random parameters and smart fidelity fallback
-                self._handle_acquisition_failure(study, trial, search_space, n_trials)
+                self._handle_acquisition_failure(study)
                 return {}
 
         if not isinstance(candidates, torch.Tensor):
@@ -321,9 +317,6 @@ class MFBotorchSampler(BaseSampler):
     def _handle_acquisition_failure(
         self,
         study: Study,
-        trial: FrozenTrial,
-        search_space: dict[str, BaseDistribution],
-        n_trials: int,
     ) -> None:
         """Handle acquisition function failure with smart fidelity fallback."""
         # Compute smart fidelity based on recent trials and exploration/exploitation balance
@@ -331,9 +324,8 @@ class MFBotorchSampler(BaseSampler):
 
         if len(completed_trials) == 0:
             # If no completed trials, use medium fidelity
-            fallback_fidelity = 0.7
+            fallback_fidelity = 0.0
         else:
-            # Analyze recent performance and suggest appropriate fidelity
             recent_trials = completed_trials[-min(5, len(completed_trials)) :]  # Last 5 trials
             recent_fidelities = []
 
@@ -344,20 +336,14 @@ class MFBotorchSampler(BaseSampler):
             if recent_fidelities:
                 avg_recent_fidelity = numpy.mean(recent_fidelities)
 
-                # If we've been using high fidelity recently, try lower fidelity for exploration
                 if avg_recent_fidelity > 0.8:
                     fallback_fidelity = numpy.random.uniform(0.3, 0.6)
-                # If we've been using low fidelity, use medium to high fidelity
                 elif avg_recent_fidelity < 0.4:
                     fallback_fidelity = numpy.random.uniform(0.6, 0.9)
                 else:
-                    # Balanced approach
                     fallback_fidelity = numpy.random.uniform(0.4, 0.8)
             else:
                 fallback_fidelity = 0.7
 
         # Store the fallback fidelity
         self._current_trial_fidelity = fallback_fidelity
-        # study._storage.set_trial_system_attr(
-        #     trial._trial_id, "MFBOSampler:Fidelity", fallback_fidelity
-        # )
