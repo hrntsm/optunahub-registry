@@ -17,6 +17,7 @@ from optuna.study import StudyDirection
 from optuna.trial import FrozenTrial
 from optuna.trial import TrialState
 
+from ._acquisition_func import _handle_acquisition_failure
 from ._acquisition_func import get_default_mf_candidates_func
 
 
@@ -51,8 +52,6 @@ class MFBotorchSampler(BaseSampler):
             Independent sampler for initial trials and conditional parameters.
         seed:
             Random seed.
-        device:
-            torch device for BoTorch computations. Specify CUDA device for acceleration.
     """
 
     def __init__(
@@ -74,19 +73,18 @@ class MFBotorchSampler(BaseSampler):
         n_startup_trials: int = 10,
         independent_sampler: BaseSampler | None = None,
         seed: int | None = None,
-        device: "torch.device | None" = None,
     ):
         _imports.check()
 
         self._candidates_func = candidates_func
-        self._acquisition_function = acquisition_function
+        self._candidates_func_type = acquisition_function
         self._independent_sampler = independent_sampler or RandomSampler(seed=seed)
         self._n_startup_trials = n_startup_trials
         self._seed = seed
 
         self._study_id: int | None = None
         self._search_space = IntersectionSearchSpace()
-        self._device = device or torch.device("cpu")
+        self._device = torch.device("cpu")
         self._current_trial_params: dict[str, Any] | None = None
         self._current_trial_fidelity: float | None = None
 
@@ -126,10 +124,17 @@ class MFBotorchSampler(BaseSampler):
     ) -> dict[str, Any]:
         assert isinstance(search_space, dict)
 
+        if len(search_space) == 0:
+            return {}
+
         completed_trials = study.get_trials(deepcopy=False, states=(TrialState.COMPLETE,))
-        trials = completed_trials
+        running_trials = [
+            t for t in study.get_trials(deepcopy=False, states=(TrialState.RUNNING,)) if t != trial
+        ]
+        trials = completed_trials + running_trials
 
         n_trials = len(trials)
+        n_completed_trials = len(completed_trials)
         if n_trials < self._n_startup_trials:
             startup_fidelity = self._startup_fidelity[n_trials]
             study._storage.set_trial_system_attr(
@@ -144,33 +149,37 @@ class MFBotorchSampler(BaseSampler):
             raise ValueError(
                 "Multi-fidelity optimization supports only single-objective problems."
             )
-
         values: numpy.ndarray | torch.Tensor = numpy.empty((n_trials, 1), dtype=numpy.float64)
         params: numpy.ndarray | torch.Tensor
-        bounds: numpy.ndarray | torch.Tensor = trans.bounds
-
+        fidelity_bounds = numpy.array([[0.0, 1.0]], dtype=numpy.float64)
+        bounds: numpy.ndarray | torch.Tensor = numpy.concatenate(
+            [trans.bounds, fidelity_bounds], axis=0
+        )
         params = numpy.empty(
             (n_trials, trans.bounds.shape[0] + 1), dtype=numpy.float64
         )  # +1 for fidelity
 
-        fidelity_bounds = numpy.array([[0.0, 1.0]], dtype=numpy.float64)
-        bounds = numpy.concatenate([bounds, fidelity_bounds], axis=0)
-
         for trial_idx, trial in enumerate(trials):
             if trial.state == TrialState.COMPLETE:
-                regular_params = trans.transform(trial.params)
+                candidate_params = trans.transform(trial.params)
                 trial_fidelity = trial.system_attrs.get("MFBOSampler:Fidelity", 1.0)
-
                 # Combine regular parameters with fidelity (fidelity as last dimension)
-                params[trial_idx, :-1] = regular_params
+                params[trial_idx, :-1] = candidate_params
                 params[trial_idx, -1] = trial_fidelity
-
                 assert len(study.directions) == len(trial.values)
                 for obj_idx, (direction, value) in enumerate(zip(study.directions, trial.values)):
                     assert value is not None
                     if direction == StudyDirection.MINIMIZE:
                         value *= -1
                     values[trial_idx, obj_idx] = value
+            elif trial.state == TrialState.RUNNING:
+                assert False, "TrialState.RUNNING is not supported in multi-fidelity sampler now."
+                # if all(p in trial.params for p in search_space):
+                #     params[trial_idx] = trans.transform(trial.params)
+                # else:
+                #     params[trial_idx] = numpy.nan
+            else:
+                assert False, "trail.state must be TrialState.COMPLETE or TrialState.RUNNING."
 
         values = torch.from_numpy(values).to(self._device)
         params = torch.from_numpy(params).to(self._device)
@@ -179,15 +188,18 @@ class MFBotorchSampler(BaseSampler):
 
         if self._candidates_func is None:
             self._candidates_func = get_default_mf_candidates_func(
-                acquisition_function=self._acquisition_function
+                candidates_func_type=self._candidates_func_type
             )
+
+        completed_values = values[:n_completed_trials]
+        completed_params = params[:n_completed_trials]
 
         with manual_seed(self._seed):
             # Call multi-fidelity candidate function to get both candidates and fidelity
             try:
                 candidates, fidelity = self._candidates_func(
-                    params,
-                    values,
+                    completed_params,
+                    completed_values,
                     bounds,
                     None,
                 )
@@ -207,13 +219,13 @@ class MFBotorchSampler(BaseSampler):
                 import warnings
 
                 warnings.warn(
-                    f"Multi-fidelity acquisition function failed due to numerical issues: {e}. "
+                    f"Multi-fidelity candidates function failed due to numerical issues: {e}. "
                     "Falling back to random parameter sampling with computed fidelity.",
                     UserWarning,
                 )
 
                 # Generate random parameters and smart fidelity fallback
-                self._handle_acquisition_failure(study)
+                self._current_trial_fidelity = _handle_acquisition_failure(study)
                 return {}
 
         if not isinstance(candidates, torch.Tensor):
@@ -236,25 +248,14 @@ class MFBotorchSampler(BaseSampler):
                 f"Actual candidates: {candidates.size(0)}, expected: {bounds.size(1) - 1}."
             )
 
-        # Need to add back fidelity dimension for untransform
-        # Fidelity was the last dimension in train_x, so we need to reconstruct it
-        fidelity_value = trial.system_attrs["MFBOSampler:Fidelity"]
-
-        # Reconstruct full parameter vector with fidelity as last dimension
-        full_candidates = torch.zeros(candidates.size(0) + 1)
-        full_candidates[:-1] = candidates  # All regular parameters
-        full_candidates[-1] = fidelity_value  # Fidelity as last dimension
-
-        # Store the computed parameters and return empty dict to ensure
-        # sample_independent is called to preserve fidelity
-        regular_params = trans.untransform(full_candidates[:-1].cpu().numpy())
+        candidate_params = trans.untransform(candidates.cpu().numpy())
 
         # Store for use in sample_independent
-        self._current_trial_params = regular_params
+        self._current_trial_params = candidate_params
         # Also store the fidelity from trial attributes
         self._current_trial_fidelity = trial.system_attrs.get("MFBOSampler:Fidelity")
 
-        return {}
+        return candidate_params
 
     def sample_independent(
         self,
@@ -313,37 +314,3 @@ class MFBotorchSampler(BaseSampler):
         values: Sequence[float] | None,
     ) -> None:
         self._independent_sampler.after_trial(study, trial, state, values)
-
-    def _handle_acquisition_failure(
-        self,
-        study: Study,
-    ) -> None:
-        """Handle acquisition function failure with smart fidelity fallback."""
-        # Compute smart fidelity based on recent trials and exploration/exploitation balance
-        completed_trials = study.get_trials(deepcopy=False, states=(TrialState.COMPLETE,))
-
-        if len(completed_trials) == 0:
-            # If no completed trials, use medium fidelity
-            fallback_fidelity = 0.0
-        else:
-            recent_trials = completed_trials[-min(5, len(completed_trials)) :]  # Last 5 trials
-            recent_fidelities = []
-
-            for t in recent_trials:
-                fid = t.system_attrs.get("MFBOSampler:Fidelity", 1.0)
-                recent_fidelities.append(fid)
-
-            if recent_fidelities:
-                avg_recent_fidelity = numpy.mean(recent_fidelities)
-
-                if avg_recent_fidelity > 0.8:
-                    fallback_fidelity = numpy.random.uniform(0.3, 0.6)
-                elif avg_recent_fidelity < 0.4:
-                    fallback_fidelity = numpy.random.uniform(0.6, 0.9)
-                else:
-                    fallback_fidelity = numpy.random.uniform(0.4, 0.8)
-            else:
-                fallback_fidelity = 0.7
-
-        # Store the fallback fidelity
-        self._current_trial_fidelity = fallback_fidelity

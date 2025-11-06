@@ -2,20 +2,19 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from optuna._imports import try_import
-
-
-with try_import() as _imports:
-    from botorch.acquisition.knowledge_gradient import qMultiFidelityKnowledgeGradient
-    from botorch.acquisition.max_value_entropy_search import qMultiFidelityMaxValueEntropy
-    from botorch.fit import fit_gpytorch_mll
-    from botorch.models import SingleTaskMultiFidelityGP
-    from botorch.models.transforms.outcome import Standardize
-    from botorch.optim import optimize_acqf
-    from botorch.utils.transforms import normalize
-    from botorch.utils.transforms import unnormalize
-    from gpytorch.mlls import ExactMarginalLogLikelihood
-    import torch
+from botorch.acquisition.knowledge_gradient import qMultiFidelityKnowledgeGradient
+from botorch.acquisition.max_value_entropy_search import qMultiFidelityMaxValueEntropy
+from botorch.fit import fit_gpytorch_mll
+from botorch.models import SingleTaskMultiFidelityGP
+from botorch.models.transforms.outcome import Standardize
+from botorch.optim import optimize_acqf
+from botorch.utils.transforms import normalize
+from botorch.utils.transforms import unnormalize
+from gpytorch.mlls import ExactMarginalLogLikelihood
+import numpy as np
+from optuna.study import Study
+from optuna.trial import TrialState
+import torch
 
 
 def qmfkg_candidates_func(
@@ -73,7 +72,7 @@ def qmfkg_candidates_func(
 
     acqf = qMultiFidelityKnowledgeGradient(
         model=model,
-        X_pending=normalize(pending_x, bounds=bounds) if pending_x is not None else None,
+        X_pending=(normalize(pending_x, bounds=bounds) if pending_x is not None else None),
     )
 
     standard_bounds = torch.zeros_like(bounds)
@@ -139,7 +138,7 @@ def qmfmes_candidates_func(
     acqf = qMultiFidelityMaxValueEntropy(
         model=model,
         candidate_set=torch.rand(256, train_x.size(-1)),  # Candidate set
-        X_pending=normalize(pending_x, bounds=bounds) if pending_x is not None else None,
+        X_pending=(normalize(pending_x, bounds=bounds) if pending_x is not None else None),
     )
 
     standard_bounds = torch.zeros_like(bounds)
@@ -170,7 +169,7 @@ def qmfmes_candidates_func(
 
 
 def get_default_mf_candidates_func(
-    acquisition_function: str = "mfkg",
+    candidates_func_type: str = "mfkg",
 ) -> Callable[
     [
         "torch.Tensor",
@@ -181,9 +180,43 @@ def get_default_mf_candidates_func(
     tuple["torch.Tensor", "torch.Tensor"],
 ]:
     """Select default multi-fidelity acquisition function."""
-    if acquisition_function.lower() == "mfkg":
+    if candidates_func_type.lower() == "mfkg":
         return qmfkg_candidates_func
-    elif acquisition_function.lower() == "mfmes":
+    elif candidates_func_type.lower() == "mfmes":
         return qmfmes_candidates_func
     else:
-        raise ValueError(f"Unknown acquisition function: {acquisition_function}")
+        raise ValueError(f"Unknown acquisition function: {candidates_func_type}")
+
+
+def _handle_acquisition_failure(
+    study: Study,
+) -> float:
+    """Handle acquisition function failure with smart fidelity fallback."""
+    # Compute smart fidelity based on recent trials and exploration/exploitation balance
+    completed_trials = study.get_trials(deepcopy=False, states=(TrialState.COMPLETE,))
+
+    if len(completed_trials) == 0:
+        # If no completed trials, use medium fidelity
+        fallback_fidelity = 0.0
+    else:
+        recent_trials = completed_trials[-min(5, len(completed_trials)) :]  # Last 5 trials
+        recent_fidelities = []
+
+        for t in recent_trials:
+            fid = t.system_attrs.get("MFBOSampler:Fidelity", 1.0)
+            recent_fidelities.append(fid)
+
+        if recent_fidelities:
+            avg_recent_fidelity = np.mean(recent_fidelities)
+
+            if avg_recent_fidelity > 0.8:
+                fallback_fidelity = np.random.uniform(0.3, 0.6)
+            elif avg_recent_fidelity < 0.4:
+                fallback_fidelity = np.random.uniform(0.6, 0.9)
+            else:
+                fallback_fidelity = np.random.uniform(0.4, 0.8)
+        else:
+            fallback_fidelity = 0.7
+
+    # Store the fallback fidelity
+    return fallback_fidelity
