@@ -11,6 +11,8 @@ from botorch.optim import optimize_acqf
 from botorch.utils.transforms import normalize
 from botorch.utils.transforms import unnormalize
 from gpytorch.mlls import ExactMarginalLogLikelihood
+from gpytorch.settings import cholesky_jitter
+from gpytorch.settings import max_cholesky_size
 import numpy as np
 from optuna.study import Study
 from optuna.trial import TrialState
@@ -61,17 +63,49 @@ def qmfkg_candidates_func(
     train_x = normalize(train_x, bounds=bounds)
     train_y = train_obj
 
-    model = SingleTaskMultiFidelityGP(
-        train_x,
-        train_y,
-        data_fidelities=fidelity_dims,
-        outcome_transform=Standardize(m=train_y.size(-1)),
-    )
-    mll = ExactMarginalLogLikelihood(model.likelihood, model)
-    fit_gpytorch_mll(mll)
+    # Remove near-duplicate points to improve numerical stability
+    # This helps prevent singular covariance matrices
+    unique_mask = torch.ones(train_x.shape[0], dtype=torch.bool)
+    for i in range(train_x.shape[0]):
+        if unique_mask[i]:
+            # Find points very close to current point
+            distances = torch.norm(train_x[i + 1 :] - train_x[i], dim=1)
+            duplicate_mask = distances < 1e-6
+            if duplicate_mask.any():
+                # Mark duplicates for removal
+                duplicate_indices = torch.where(duplicate_mask)[0] + i + 1
+                unique_mask[duplicate_indices] = False
+
+    train_x = train_x[unique_mask]
+    train_y = train_y[unique_mask]
+
+    # Use much larger jitter for better numerical stability
+    # This helps when the covariance matrix is not positive definite
+    # Increased from default 1e-8 to 1e-3/1e-4 to handle numerical issues
+    with cholesky_jitter(float_value=1e-3, double_value=1e-4), max_cholesky_size(2000):
+        model = SingleTaskMultiFidelityGP(
+            train_x,
+            train_y,
+            data_fidelities=fidelity_dims,
+            outcome_transform=Standardize(m=train_y.size(-1)),
+        )
+
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+
+        # Fit with more robust settings for numerical stability
+        # max_attempts increased to give more chances for successful fit
+        fit_gpytorch_mll(
+            mll,
+            options={
+                "maxiter": 100,  # Reduce iterations to avoid numerical issues
+                "disp": False,  # Suppress convergence warnings
+            },
+            max_attempts=10,  # Try multiple times with different initializations
+        )
 
     acqf = qMultiFidelityKnowledgeGradient(
         model=model,
+        num_fantasies=256,
         X_pending=(normalize(pending_x, bounds=bounds) if pending_x is not None else None),
     )
 
@@ -82,8 +116,8 @@ def qmfkg_candidates_func(
         acq_function=acqf,
         bounds=standard_bounds,
         q=1,
-        num_restarts=20,
-        raw_samples=1024,
+        num_restarts=10,
+        raw_samples=512,
         options={"batch_limit": 8, "maxiter": 200},
         sequential=True,
     )
@@ -126,17 +160,49 @@ def qmfmes_candidates_func(
     train_x = normalize(train_x, bounds=bounds)
     train_y = train_obj
 
-    model = SingleTaskMultiFidelityGP(
-        train_x,
-        train_y,
-        data_fidelities=fidelity_dims,
-        outcome_transform=Standardize(m=train_y.size(-1)),
-    )
-    mll = ExactMarginalLogLikelihood(model.likelihood, model)
-    fit_gpytorch_mll(mll)
+    # Remove near-duplicate points to improve numerical stability
+    # This helps prevent singular covariance matrices
+    unique_mask = torch.ones(train_x.shape[0], dtype=torch.bool)
+    for i in range(train_x.shape[0]):
+        if unique_mask[i]:
+            # Find points very close to current point
+            distances = torch.norm(train_x[i + 1 :] - train_x[i], dim=1)
+            duplicate_mask = distances < 1e-6
+            if duplicate_mask.any():
+                # Mark duplicates for removal
+                duplicate_indices = torch.where(duplicate_mask)[0] + i + 1
+                unique_mask[duplicate_indices] = False
+
+    train_x = train_x[unique_mask]
+    train_y = train_y[unique_mask]
+
+    # Use much larger jitter for better numerical stability
+    # This helps when the covariance matrix is not positive definite
+    # Increased from default 1e-8 to 1e-3/1e-4 to handle numerical issues
+    with cholesky_jitter(float_value=1e-3, double_value=1e-4), max_cholesky_size(2000):
+        model = SingleTaskMultiFidelityGP(
+            train_x,
+            train_y,
+            data_fidelities=fidelity_dims,
+            outcome_transform=Standardize(m=train_y.size(-1)),
+        )
+
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+
+        # Fit with more robust settings for numerical stability
+        # max_attempts increased to give more chances for successful fit
+        fit_gpytorch_mll(
+            mll,
+            options={
+                "maxiter": 100,  # Reduce iterations to avoid numerical issues
+                "disp": False,  # Suppress convergence warnings
+            },
+            max_attempts=10,  # Try multiple times with different initializations
+        )
 
     acqf = qMultiFidelityMaxValueEntropy(
         model=model,
+        num_fantasies=256,
         candidate_set=torch.rand(256, train_x.size(-1)),  # Candidate set
         X_pending=(normalize(pending_x, bounds=bounds) if pending_x is not None else None),
     )
