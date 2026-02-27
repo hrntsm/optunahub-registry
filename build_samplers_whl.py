@@ -18,12 +18,11 @@ Install:
 
 from __future__ import annotations
 
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
-
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent
 SAMPLERS_SRC = REPO_ROOT / "package" / "samplers"
@@ -39,7 +38,7 @@ TARGET_SAMPLERS = [
     "differential_evolution",
     "hype",
     "moead",
-    "nsgaii",
+    "nsgaii_with_initial_trials",
     "speaii",
     # EvolutionStrategy
     "implicit_natural_gradient",
@@ -135,7 +134,15 @@ def build(tmp_dir: Path) -> Path:
     """wheel をビルドして dist/ に配置する."""
     DIST_DIR.mkdir(exist_ok=True)
     result = subprocess.run(
-        [sys.executable, "-m", "build", "--wheel", "--outdir", str(DIST_DIR), str(tmp_dir)],
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--wheel",
+            "--outdir",
+            str(DIST_DIR),
+            str(tmp_dir),
+        ],
         capture_output=True,
         text=True,
     )
