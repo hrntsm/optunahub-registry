@@ -18,11 +18,12 @@ Install:
 
 from __future__ import annotations
 
+from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+
 
 REPO_ROOT = Path(__file__).parent
 SAMPLERS_SRC = REPO_ROOT / "package" / "samplers"
@@ -34,6 +35,7 @@ TARGET_SAMPLERS = [
     "ctpe",
     "hebo",
     "turbo",
+    "value_at_risk",
     # EvolutionAlgorithm
     "differential_evolution",
     "hype",
@@ -107,7 +109,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "optunahub-samplers"
-version = "0.1.0"
+version = "1.4.0"
 description = "Selected samplers from OptunaHub Registry"
 requires-python = ">=3.8"
 dependencies = [
