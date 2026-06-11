@@ -9,7 +9,7 @@ Target samplers:
   Top-level:            auto_sampler
 
 Usage:
-  python build_samplers_whl.py
+  uv run build_samplers_whl.py
   -> dist/ に .whl が生成されます
 
 Install:
@@ -24,10 +24,10 @@ import subprocess
 import sys
 import tempfile
 
-
 REPO_ROOT = Path(__file__).parent
 SAMPLERS_SRC = REPO_ROOT / "package" / "samplers"
 DIST_DIR = REPO_ROOT / "dist"
+VERSION = "1.5.0.dev1"
 
 TARGET_SAMPLERS = [
     # BayesianOptimization
@@ -45,6 +45,8 @@ TARGET_SAMPLERS = [
     # EvolutionStrategy
     "implicit_natural_gradient",
     "mocma",
+    "restart_cmaes",
+    "cma_es_refinement",
     # SwarmIntelligence
     "grey_wolf_optimization",
     "pso",
@@ -101,26 +103,34 @@ def copy_sampler(sampler_name: str, src_dir: Path, dest_dir: Path) -> None:
 
 def create_pyproject_toml(build_dir: Path) -> None:
     """pyproject.toml を生成する."""
-    deps = "\n".join(f'  "{dep}",' for dep in DEPENDENCIES)
     content = f"""\
 [build-system]
-requires = ["setuptools >= 61.1.0", "wheel"]
+requires = ["setuptools >= 40.8.0", "wheel"]
 build-backend = "setuptools.build_meta"
-
-[project]
-name = "optunahub-samplers"
-version = "1.4.0"
-description = "Selected samplers from OptunaHub Registry"
-requires-python = ">=3.8"
-dependencies = [
-{deps}
-]
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["optunahub_samplers", "optunahub_samplers.*"]
 """
     (build_dir / "pyproject.toml").write_text(content)
+
+
+def create_setup_py(build_dir: Path) -> None:
+    """setup.py を生成する."""
+    deps = "\n".join(f"        {dep!r}," for dep in DEPENDENCIES)
+    content = f"""\
+from setuptools import find_packages
+from setuptools import setup
+
+
+setup(
+    name="optunahub-samplers",
+    version={VERSION!r},
+    description="Selected samplers from OptunaHub Registry",
+    packages=find_packages(include=["optunahub_samplers", "optunahub_samplers.*"]),
+    python_requires=">=3.8",
+    install_requires=[
+{deps}
+    ],
+)
+"""
+    (build_dir / "setup.py").write_text(content)
 
 
 def create_package_init(pkg_dir: Path) -> None:
@@ -135,16 +145,38 @@ def create_package_init(pkg_dir: Path) -> None:
 def build(tmp_dir: Path) -> Path:
     """wheel をビルドして dist/ に配置する."""
     DIST_DIR.mkdir(exist_ok=True)
-    result = subprocess.run(
-        [
-            sys.executable,
+    build_command = [
+        sys.executable,
+        "-m",
+        "build",
+        "--wheel",
+        "--no-isolation",
+        "--outdir",
+        str(DIST_DIR),
+        str(tmp_dir),
+    ]
+    if shutil.which("uv") is not None:
+        build_command = [
+            "uv",
+            "run",
+            "--with",
+            "build",
+            "--with",
+            "setuptools",
+            "--with",
+            "wheel",
+            "python",
             "-m",
             "build",
             "--wheel",
+            "--no-isolation",
             "--outdir",
             str(DIST_DIR),
             str(tmp_dir),
-        ],
+        ]
+
+    result = subprocess.run(
+        build_command,
         capture_output=True,
         text=True,
     )
@@ -173,6 +205,7 @@ def main() -> None:
 
         create_package_init(pkg_dir)
         create_pyproject_toml(tmp_dir)
+        create_setup_py(tmp_dir)
 
         print("\nBuilding wheel...")
         out_dir = build(tmp_dir)
