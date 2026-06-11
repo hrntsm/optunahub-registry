@@ -1,5 +1,5 @@
 ---
-author: Rishabh-git10
+author: Rishabh Dewangan
 title: Heteroscedastic Gaussian-Process Sampler
 description: A Gaussian Process-based Bayesian Optimization sampler that natively supports heteroscedastic (input-dependent) observation noise to prevent surrogate model corruption.
 tags: [sampler, gaussian-process, bayesian-optimization, heteroscedastic]
@@ -14,6 +14,8 @@ Standard Bayesian Optimization assumes homoscedastic (constant) noise across the
 The `HeteroscedasticGPSampler` natively supports input-dependent observation noise. By explicitly passing the known or estimated noise variance of a trial via a user-defined `noise_func`, this sampler maps and isolates high-variance regions. This prevents global surrogate corruption, allowing the acquisition function to maintain sharp exploitation in the clean regions of the search space.
 
 This mirrors the architectural capability of advanced frameworks like BoTorch (via `train_Yvar`), bringing robust, noise-aware Bayesian Optimization natively to Optuna.
+
+**Note:** This implementation is distinct from HEBO (Heteroscedastic Evolutionary Bayesian Optimization). While HEBO handles heteroscedasticity by applying non-linear warping to objective values, this sampler allows users to explicitly provide the observation noise variance at each individual data point.
 
 ## Performance
 
